@@ -1,0 +1,1307 @@
+---
+title: "2024 Content Trends"
+subtitle: "Insights to Power Your 2025 Strategy"
+author: "Lovely Fernandez C20305696"
+format: html
+editor: visual
+---
+
+## Data Preparation
+
+```{r setup, include=FALSE}
+
+Sys.setlocale("LC_ALL", "en_US.UTF-8")
+
+# libraries
+library(dplyr)
+library(readr)
+library(purrr)
+library(stringr)
+library(tidyverse)
+library(VIM)
+library(cld2)
+library(stringr)
+library(plotly)
+library(sf)
+library(ggplot2)
+library(maps)
+library(countrycode)
+library(scales)
+
+```
+
+```{r setup, include=FALSE}
+
+# path to dataset folder
+data_path <- "Top 100 Influencers"
+
+# list country folders from dataset folder
+country_folders <- list.dirs(path = data_path, full.names = TRUE, recursive = FALSE)
+
+# social media platforms to work with
+platforms <- c("tiktok", "instagram", "youtube")
+
+# column names
+base_columns <- c("rank", "name", "followers", "engagement", "country", "topic", "reach")
+
+# detect headers from entering as data
+known_header_names <- tolower(c(
+  "name", "اسم", "الاسم", "نام", "имя", "ИМЕ", "namn", "名", "名稱", "ime", "nome", "nombre"
+))
+
+# list of merged data
+merged_data <- list()
+
+# load each country folder and combine the same platforms
+for (platform in platforms) {
+  
+  # merge files in the same platform
+  platform_data <- map_dfr(country_folders, function(folder) {
+    # same platform files (platform_data_country.csv)
+    files <- list.files(folder, pattern = paste0(platform, "_data_.*\\.csv$"), full.names = TRUE)
+    
+    data_list <- lapply(files, function(file) {
+      df <- read_csv(file, col_names = FALSE, show_col_types = FALSE)
+      
+      # keep the first 8 columns (ignore extra info)
+      df <- df[, 1:min(ncol(df), length(base_columns))]
+      
+      # set column names
+      colnames(df) <- base_columns[1:ncol(df)]
+      
+      # remove rows that are actually headers in various languages
+      df <- df %>%
+        filter(!tolower(name) %in% known_header_names)
+
+      # metadata
+      df$platform <- platform
+      df$target_market <- basename(folder)
+      
+      return(df)
+    })
+    
+    bind_rows(data_list)
+  })
+  
+  # save to the merged_data
+  merged_data[[platform]] <- platform_data
+}
+
+# separating platform data
+tiktok_data <- merged_data[["tiktok"]]
+instagram_data <- merged_data[["instagram"]]
+youtube_data <- merged_data[["youtube"]]
+
+# checking the data
+# head(tiktok_data, 5)
+# head(instagram_data, 5)
+# head(youtube_data, 5)
+
+# merge all 3 platforms into one dataset
+# adding a new column "platform"
+tiktok_data$platform <- "tiktok"
+instagram_data$platform <- "instagram"
+youtube_data$platform <- "youtube"
+
+all_platforms_data <- bind_rows(tiktok_data, instagram_data, youtube_data)
+
+# view(all_platforms_data)
+# head(all_platforms_data, 5)
+
+```
+
+```{r}
+
+# all_platforms_data
+
+# create a copy of original data - social media dataset
+sm_dataset <- all_platforms_data
+
+# exploring and understanding the data
+str(sm_dataset)
+view(sm_dataset)
+
+```
+
+```{r}
+
+# fixing data types
+# convert numeric cols from char to numeric data types
+
+convert_number <- function(x) {
+  x <- toupper(x)
+  x <- trimws(x)
+  x <- ifelse(grepl("M", x), as.numeric(gsub("M", "", x)) * 1e6,
+         ifelse(grepl("K", x), as.numeric(gsub("K", "", x)) * 1e3,
+         as.numeric(x)))
+  return(x)
+}
+
+# apply to followers and reach cols
+sm_dataset$followers <- convert_number(sm_dataset$followers)
+sm_dataset$reach <- convert_number(sm_dataset$reach)
+
+# deleting rank column as it is not needed (ASC follower count)
+# convert rank as integer and reset rank based on number of followers
+# sm_dataset$rank <- as.integer(sm_dataset$rank)
+sm_dataset <- sm_dataset %>% select(-rank)
+
+# clean and convert engagement to decimal format
+sm_dataset$engagement <- gsub("%", "", sm_dataset$engagement) # remove %
+sm_dataset$engagement <- trimws(tolower(sm_dataset$engagement)) # trim spaces, lowercase (in case)
+
+sm_dataset$engagement <- ifelse(
+  sm_dataset$engagement %in% c("-", "", "n/a", "na", "null", "—"),
+  NA,
+  sm_dataset$engagement
+)
+
+sm_dataset$engagement <- as.numeric(sm_dataset$engagement)
+
+sm_dataset$engagement <- ifelse( sm_dataset$engagement > 100, 95.00, sm_dataset$engagement ) # adding this cap due to 100+ values for %
+
+str(sm_dataset)
+view(sm_dataset) # numeric columns are updated
+
+```
+
+```{r}
+na_numeric_rows <- sm_dataset %>%
+  filter(if_any(where(is.numeric), is.na))
+
+print(na_numeric_rows)
+
+# handling NA values in engagement rate
+# similar values are used to fill na engagement cells (knn imputation technique)
+# found similar influencers by country, platform, topic and follower count for realistic engagement rates estimations
+knn_temp_data <- sm_dataset %>% 
+  select(engagement, followers, country, platform, topic)
+
+knn_temp_data <- knn_temp_data %>%
+  mutate(
+    country = as.factor(country),
+    platform = as.factor(platform),
+    topic = as.factor(topic)
+  )
+
+knn_result <- kNN(knn_temp_data, variable = "engagement", k = 5, dist_var = c("followers", "country", "platform", "topic"))
+
+sm_dataset$engagement <- knn_result$engagement # update values
+```
+
+```{r}
+# columns: follower count, engagement rate and reach cleaned as well as rank is deleted
+na_numeric_rows <- sm_dataset %>%
+  filter(if_any(where(is.numeric), is.na))
+
+print(na_numeric_rows) # no numeric NA values
+
+# cleaning remaining columns
+# final decision to force delete any non numeric columns with NA due to high amount of data available
+
+# check columns with NA values (may be important) and drop all NAs
+# na_non_numeric_rows <- sm_dataset %>%
+  # filter(if_any(where(~ !is.numeric(.)), is.na))
+
+colSums(is.na(sm_dataset[, sapply(sm_dataset, Negate(is.numeric))]))
+
+sm_dataset <- sm_dataset %>%
+  drop_na()
+
+colSums(is.na(sm_dataset)) # no NAs values left
+```
+
+```{r}
+
+# lower case country names for easier comparison
+sm_dataset <- sm_dataset %>%
+  mutate(
+    country = tolower(country),
+    target_market = tolower(target_market)
+  )
+
+# check unqieu values to check data, and using Chatgpt to give me the English format/translation of non-English data
+
+sm_dataset <- sm_dataset %>%
+  mutate(country = case_when(
+    country == "belgien" ~ "belgium",
+    country == "индонезия" ~ "indonesia",
+    country == "פרגוואי" ~ "paraguay",
+    country == "برزیل" ~ "brazil",
+    country == "رومانيا" ~ "romania",
+    country == "ریاستہائے متحدہ" ~ "united states",
+    country == "جنوبی کوریا" ~ "south korea",
+    country == "بھارت" ~ "india",
+    country == "کینیڈا" ~ "canada",
+    country == "پیورٹو ریکو" ~ "puerto rico",
+    country == "متحدہ عہدگی خصوصیں" ~ "united arab emirates",  # closest meaning
+    country == "芬蘭" ~ "finland",
+    country == "المغرب" ~ "morocco",
+    country == "மாரக்கோ" ~ "morocco",
+    country == "النرويج" ~ "norway",
+    country == "slovaquie" ~ "slovakia",
+    country == "reino unido" ~ "united kingdom",
+    country == "संयुक्त अधिराज्य" ~ "united kingdom",
+    country == "emirados árabes unidos" ~ "united arab emirates",
+    country == "suurbritannia" ~ "united kingdom",
+    country == "misri" ~ "egypt",
+    country == "poljska" ~ "poland",
+    country == "sverige" ~ "sweden",
+    TRUE ~ country
+  ))
+
+# Clean hyphens and lowercase
+sm_dataset <- sm_dataset %>%
+  mutate(country = tolower(str_replace_all(country, "-", " ")))
+
+# Standardize using countrycode
+sm_dataset <- sm_dataset %>%
+  mutate(target_market = countrycode(target_market, origin = "country.name", destination = "country.name"))
+
+#unique(sm_dataset$country)
+#unique(sm_dataset$target_market)
+# view(sm_dataset)
+```
+
+```{r}
+
+# define topic categories
+# used chatgpt to translate non-English Topics to appropriately assign the values to the right categories
+topic_categories <- list(
+  "Entertainment" = c(
+    "funny", "lustig", "romance", "wedding", "romantik", "hochzeit", 
+    "comedy", "humor", "забавно", "забавление", "zabava i glazba", 
+    "smišno", "roligt", "zabava i glazba smišno", "životinje smišno",
+    "meelelahutus", "entertainment", "quotes", "TV Shows", "Movies",
+    "television", "رقص", "lõbus", "طنز", "بسیار خنده دار",
+    "الترفيه والموسيقى", "الترفيه والموسيقى رومانسية وزفاف", 
+    "الترفيه والموسيقى مضحك موسيقى",
+    "الترفيه والموسيقى الأزياء والإکسسوارات", "celebrity", "مشہور شخصیت پالتو جانوروں"
+  ),
+  "Music" = c(
+    "music", "musik", "singer", "band", "songwriter", "dj", "producer", 
+    "гласба", "певец", "музика", "glazba", "rap", "música", "musique", 
+    "muziki", "音樂", "இசை", "موسیقی", "musique rock", "laulja", "सङ्गीत",
+    "موسيقى", "الترفيه والموسيقى التسويق والإعلان موسيقى", 
+    "الترفيه والموسيقى الأزياء والإکسسوارات موسيقى", 
+    "الترفيه والموسيقى موسيقى منتجون ترفيه", 
+    "الترفيه والموسيقى مغني موسيقى تألیف الأغانی"
+  ),
+  
+  "Sports" = c(
+    "sport", "sports", "football", "soccer", "cricket", "nba", 
+    "mlb", "баскетбол", "тенис", "спорт", "jalgpall", "ice hockey",
+    "basketball", "رياضة", "ورزش فوتبال ورزشکار", "ورزش اتومبیل فوتبال",
+    "ورزش فوتبال", "فوتبال", "ورزش تجارت و امور مالی فوتبال", "ورزش",
+    "تمويل مشهور كرة قدم مشاهير"
+  ),
+  
+  "Technology" = c(
+    "technology", "tech", "gadgets", "ai", "machine learning", "Tech"
+  ),
+  
+  "Travel and Vlog" = c(
+    "life", "travel", "nature", "outdoor", "reisen", "adventure", 
+    "journey", "приключение", "пътувания", "resor", "natur", 
+    "priroda", "viagem", "यात्रा", "سفر", "elustiil", "زندگی و جامعه مدلسازی"
+  ),
+  
+  "Family" = c(
+    "family", "familie", "област", "moms", "parenting", "familj", 
+    "pere", "família", "lapsevanemlus", "perhe", "famille", 
+    "família comida estilo de vida", "أمهات", "أطفال", "الأسرة", "Crianças"
+  ),
+  
+  "Cuisine" = c(
+    "food", "essen", "trinken", "drink", "cuisine", "recipe", 
+    "напитки", "храна", "hrana", "chakula", "chakula na vinywaji", 
+    "toit", "طعام", "الطعام والشراب"
+  ),
+  
+  "Games" = c(
+    "game", "gaming", "video", "videospiel", "игри", "esports", 
+    "datorspel", "video gaming", "video games", "jeux vidéo", 
+    "ویڈیو گیمنگ", "電子遊戲", "भिडियो गेमिङ", "ألعاب فيديو", "jogos de vídeo"
+  ),
+  "Classic Entertainment" = c(
+    "acting", "drama", "celebrity", "prominenter", "schauspiel", 
+    "zabavlenie", "muzika", "gluma", "актьорство", "драма", "знаменитост", 
+    "שחקנות", "actors", "event", "actors film", "celebrities", 
+    "näitlejad", "näitlemine", "kuulsus", "प्रसिद्धि", "مشهور شخصیت", "celebridad",
+    "kuulsus ajakirjanikud", "تمثيل", "تمثيل والدراما", "ممثلين",
+    "بازیگری و درام مد و لوازم جانبی مشهور بازیگران", "بازیگری و درام زندگی بازیگران", 
+    "بازیگری و درام مشهور تجسم", "مشهور بازیگران مشاهیر طراحی", "مد بازیگران هنر", 
+    "مشهور بازیگران مشاهیر طنز", "سرگرمی مجری تلویزیونی برنامه های تلویزیونی",
+    "TV Host", "Atores", "Actor", "Animacija i Cosplay", "بازیگران", "مشهور"
+  ),
+  
+  "Creative Arts" = c(
+    "art", "animation", "diy", "hack", "fotografie", "home", "garden",
+    "kunst", "handwerk", "photography", "painting", "illustrator", 
+    "architecture", "анимация", "косплей", "umjetnost", "umjetnost i zanati",
+    "arts and crafts", "konst", "arts and crafts home and garden", 
+    "fotografering", "fotografija", "arts and crafts entertainment and music",
+    "umjetnost i zanati zabava i glazba", "umjetnost i zanati zabava i glazba obitelj", 
+    "藝術", "فن", "هنر زیبایی و مراقبت از خود مد و لوازم جانبی هنرهای تجربی", 
+    "هنر مشهور زندگی بازیگران", "هنر بازیگران", "هنر خواننده زندگی", "Design Interior Design"
+  ),
+  
+  "Automotive" = c(
+    "auto", "vehicle", "automotive", "car", "fahrzeuge", "превозни", 
+    "мотори", "racing", "motorcycle", "السيارات", "المركبات",
+    "اتومبیل و سایر خودروها ورزش مرور اینترنتی بازیگران", "gun"
+  ),
+  
+  "Pets" = c(
+    "animal", "pet", "haustier", "tier", "животни", "кучета", 
+    "kućni ljubimci", "kućni ljubимци забавление", 
+    "مشهور شخصیت پالتو جانوروں", "زیبایی و مراقبت از خود مشاهیر حیوانات و خانمانی",
+    "بسیار خنده دار بازیگران مشاهیر حیوانات و خانمانی", "مد و لوازم جانبی طنز مشاهیر حیوانات و خانمانی"
+  ),
+  
+  "Beauty and Health" = c(
+    "beauty", "care", "fashion", "fitness", "health", "accessories", 
+    "accessoires", "schönheit", "selbstpflege", "hairstyle", "makeup", 
+    "styling", "مودة", "грижа", "ljepota i briga za sebe", 
+    "mode und accessoire", "skönhet och personlig vård", "skönheit", 
+    "fashion and accessories", "mode och accessoarer", "moda i pribor",
+    "modeling", "moda e acessórios", "estilo", "jameel", "güzellik",
+    "لباس", "جمال", "الجمال والعناية الذاتية", "Skönheit",
+    "مد مدلسازی", "تناسب اندام و سلامتی مدلسازی", "زیبایی و مراقبت از خود استایلینگ هنرمند",  
+    "مد و لوازم جانبی زیبایی و مراقبت از خود بازاریابی و تبلیغات زندگی",
+    "مد و لوازم جانبی خانواده مدلسازی مشاهیر", "اللياقة البدنية والصحة", "مشہور شخصیت",  
+    "الأزياء والإكسسوارات", "الأزياء والإکسسوارات نمط الحياة", "أزياء", "Modelagem Moda",
+    "Мода и аксесоари", "健身", "Skönhet"
+  ),
+  
+  "Brands and Collaborations" = c(
+    "product", "showcase", "brand", "sponsorship", "collaboration", 
+    "представяния", "shopping", "marketing and advertising actors", 
+    "masoko na utangazaji", "blogueiro", "criadores", 
+    "marketing", "advertising", "مارکیٹنگ", "اشتہار",
+    "عرض المنتج", "promotions", "Predstavljanje proizvoda", 
+    "مد و لوازم جانبی ویدئوبلاگ نویس"
+  ),
+  
+  "Education" = c(
+    "education", "bildung", "business", "finance", "vehicle", "auto", 
+    "automotive", "news", "politik", "обучение", "образование", 
+    "повишаване", "qualifikation", "новини", "upskilling", 
+    "utbildning", "coaching", "marketing and advertising actors coaching", 
+    "vitabu", "politics", "política", "politique", "समाचारहरू", 
+    "tax", "آموزش", "تعليم", "تعليم الحياة والمجتمع", 
+    "آموزش ارتقای مهارت ها مشهور مشاهیر", "Obrazovanje", "Obrazovanje Usavršavanje", 
+    "أخبار", "Negócios e Finanças", "Negócios e Finanças Finanças Empreendedor Modelagem", 
+    "Book", "صحافيين", "Journalists", 
+    "سیاست", "الأعمال والتمویل التمويل الشخصي", "الأعمال والتمويل"
+  )
+)
+```
+
+```{r}
+
+# categorising content topic into simplier categories due to high number of unique values (keywords above)
+
+temp_dataset <- sm_dataset # make a safe copy
+# unique(temp_dataset$topic)
+
+# category assignment
+assign_category <- function(topic, pattern_map) {
+  for (category in names(pattern_map)) {
+    patterns <- pattern_map[[category]]
+    for (pattern in patterns) {
+      if (grepl(pattern, topic, ignore.case = TRUE)) {
+        return(category)
+      }
+    }
+  }
+  return(topic)  # original topic
+}
+
+# apply to temp dataset
+clean_topics <- str_trim(temp_dataset$topic)
+simplified_categories <- sapply(clean_topics, assign_category, pattern_map = topic_categories)
+
+# assign new cateories to sm_dataset$topic
+temp_dataset$topic <- simplified_categories
+sm_dataset$topic <- temp_dataset$topic
+
+# unique(temp_dataset$topic)
+# unique(sm_dataset$topic)
+# view(sm_dataset)
+
+# sm_dataset
+```
+
+```{r}
+
+# creating a new column - view rate
+# this shows the 
+sm_dataset$view_rate <- (sm_dataset$reach / sm_dataset$followers) * 100
+
+sm_dataset$view_rate <- ifelse(
+  is.na(sm_dataset$view_rate) | is.infinite(sm_dataset$view_rate),
+  NA,
+  sm_dataset$view_rate
+)
+
+sm_dataset$view_rate <- ifelse(sm_dataset$view_rate > 100, 95.00, sm_dataset$view_rate)
+
+# sm_dataset
+
+```
+
+```{r}
+
+# correctly formatting the dataset for better visual
+smd_insights <- sm_dataset # copy finalised dataset
+
+# rename columns
+smd_insights <- smd_insights %>%
+  rename(
+    `Account` = name,
+    `Follower Count` = followers,
+    `Engagement %` = engagement,
+    `Country Base` = country,
+    `Content Topic` = topic,
+    `Reached Audience` = reach,
+    `Media Platform` = platform,
+    `Target Market` = target_market,
+    `View %` = view_rate
+  )
+
+# reorder columns
+smd_insights <- smd_insights %>%
+  select(
+    `Account`,
+    `Follower Count`,
+    `Reached Audience`,
+    `Engagement %`,
+    `View %`,
+    `Content Topic`,
+    `Country Base`,
+    `Target Market`,
+    `Media Platform`
+  )
+
+# updating country and platform values to upper case
+smd_insights <- smd_insights %>%
+  mutate(
+    `Country Base` = str_to_title(`Country Base`),
+    `Target Market` = str_to_title(`Target Market`),
+    `Media Platform` = str_to_title(`Media Platform`)
+  )
+
+# standardising country names in smd_insights to match world map data
+smd_insights <- smd_insights %>%
+  mutate(
+    `Target Market` = case_when(
+      `Target Market` == "United Kingdom" ~ "UK",
+      `Target Market` == "United States" ~ "USA",
+      `Target Market` == "Hong Kong Sar China" ~ "China",
+      `Target Market` == "Czechia" ~ "Czech Republic",
+      TRUE ~ `Target Market`  # Keep other countries as they are
+    )
+  )
+
+# platform colours, including 'Unknown' values
+platform_colors <- c(
+  "Instagram" = "#D02A7B",  
+  "Tiktok" = "#69c9D0",     
+  "Youtube" = "#FF0400",  
+  "Unknown" = "#708090"        
+)
+
+
+head(smd_insights, 5)
+```
+
+## Data Exploration Charts
+
+```{r}
+
+# check table
+#view(smd_inisghts)
+```
+
+```{r}
+
+# 1. Map Chart
+
+# identify top accounts per market
+top_accounts_per_market <- smd_insights %>%
+  group_by(`Target Market`) %>%
+  slice_max(order_by = `Follower Count`, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+# world map data
+world <- map_data("world")
+
+# merging world map with top accounts data
+world_data <- left_join(world, top_accounts_per_market, by = c("region" = "Target Market"))
+# replace only missing platforms with "Unknown"
+world_data[is.na(world_data)] <- "Unknown"
+
+# create map
+map <- ggplot(world_data) +
+  geom_polygon(
+    aes(
+      x = long, y = lat, group = group, fill = `Media Platform`,
+      text = paste0(
+        "<b>Account:</b> ", `Account`, "<br>",
+        "<b>Followers:</b> ", `Follower Count`, "<br>",
+        "<b>Content:</b> ", `Content Topic`, "<br>",
+        "<b>Target Market:</b> ", region, "<br>",
+        "<b>Platform:</b> ", `Media Platform`
+      )
+    ),
+    color = "black", size = 0.1
+  ) +
+  scale_fill_manual(
+    values = platform_colors,
+    drop = FALSE
+  ) +
+  theme_void() +
+  labs(
+    title = "Leading Social Media Influencers by Country",
+    fill = "Platform"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold")
+  )
+
+interactive_map <- ggplotly(map, tooltip = "text")
+interactive_map
+
+```
+
+```{r}
+
+# 2. Barchart Top Influencers per Platform 
+
+# top 30 yt influencers
+yt_filtered <- smd_insights %>%
+  filter(`Media Platform` == "Youtube") %>%
+  group_by(`Country Base`) %>%
+  slice_max(order_by = `Follower Count`, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  arrange(desc(`Follower Count`)) %>%
+  slice_head(n = 30)
+
+yt_filtered$Rank <- 1:nrow(yt_filtered)
+yt_filtered$Account <- make.unique(as.character(yt_filtered$Account))
+yt_filtered$Rank <- factor(yt_filtered$Rank, levels = rev(yt_filtered$Rank))
+
+# reformat follower count for easy understanding
+format_followers <- function(x) {
+  if (x >= 1e6) {
+    paste0(round(x / 1e6, 1), "M")
+  } else if (x >= 1e3) {
+    paste0(round(x / 1e3, 1), "K")
+  } else {
+    as.character(x)
+  }
+}
+
+yt_filtered$`Followers Label` <- sapply(yt_filtered$`Follower Count`, format_followers)
+yt_filtered$ShortName <- sub("[^a-zA-Z0-9]+.*$", "", yt_filtered$Account)
+
+# create chart
+yt_barchart <- ggplot(yt_filtered, aes(
+  x = Rank,
+  y = `Follower Count`,
+  text = paste0(
+    "<b>Rank:</b> ", Rank, "<br>",
+    "<b>Account:</b> ", Account, "<br>",
+    "<b>Followers:</b> ", `Followers Label`, "<br>",
+    "<b>Content:</b> ", `Content Topic`, "<br>",
+    "<b>Market:</b> ", `Target Market`
+  )
+)) +
+  coord_flip() +
+  geom_bar(stat = "identity", fill = "#800000", width = 0.8) +
+  scale_y_continuous(
+    labels = scales::label_number(scale_cut = scales::cut_short_scale()),
+    expand = expansion(mult = c(0, 0.15))  # space on right
+  ) +
+  labs(
+    title = "Top 30 YouTube Influencers",
+    x = "Rank",
+    y = "Number of Followers"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.margin = margin(5.5, 100, 5.5, 5.5),  
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8),
+    axis.text.y = element_text(size = 7),
+    axis.text.x = element_text(size = 10),
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+yt_top_influencers_barchart_interactive <- ggplotly(yt_barchart, tooltip = "text")
+
+# add name labels to the RIGHT of the bar
+yt_top_influencers_barchart_interactive <- yt_top_influencers_barchart_interactive %>%
+  layout(annotations = lapply(1:nrow(yt_filtered), function(i) {
+    list(
+      x = yt_filtered$`Follower Count`[i] + max(yt_filtered$`Follower Count`) * 0.01,
+      y = nrow(yt_filtered) - (i-1),  
+      text = yt_filtered$ShortName[i],
+      xref = "x",
+      yref = "y",
+      showarrow = FALSE,
+      font = list(size = 10, color = "black"),
+      xanchor = "left",
+      align = "left"
+    )
+  }))
+
+
+yt_top_influencers_barchart_interactive
+
+```
+
+```{r}
+
+# top 30 instagram influencers
+ig_filtered <- smd_insights %>%
+  filter(`Media Platform` == "Instagram") %>%
+  group_by(`Country Base`) %>%
+  slice_max(order_by = `Follower Count`, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  arrange(desc(`Follower Count`)) %>%
+  slice_head(n = 30)
+
+ig_filtered$Rank <- 1:nrow(ig_filtered)
+ig_filtered$Account <- make.unique(as.character(ig_filtered$Account))
+ig_filtered$Rank <- factor(ig_filtered$Rank, levels = rev(ig_filtered$Rank))
+ig_filtered$`Followers Label` <- sapply(ig_filtered$`Follower Count`, format_followers)
+ig_filtered$ShortName <- sub("[^a-zA-Z0-9]+.*$", "", ig_filtered$Account)
+
+ig_barchart <- ggplot(ig_filtered, aes(
+  x = Rank,
+  y = `Follower Count`,
+  text = paste0(
+    "<b>Rank:</b> ", Rank, "<br>",
+    "<b>Account:</b> ", Account, "<br>",
+    "<b>Followers:</b> ", `Followers Label`, "<br>",
+    "<b>Content:</b> ", `Content Topic`, "<br>",
+    "<b>Market:</b> ", `Target Market`
+  )
+)) +
+  coord_flip() +
+  geom_bar(stat = "identity", fill = "#C13584", width = 0.8) +  # Instagram pink
+  scale_y_continuous(
+    labels = scales::label_number(scale_cut = scales::cut_short_scale()),
+    expand = expansion(mult = c(0, 0.15))
+  ) +
+  labs(
+    title = "Top 30 Instagram Influencers",
+    x = "Rank",
+    y = "Number of Followers"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.margin = margin(5.5, 100, 5.5, 5.5),
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8),
+    axis.text.y = element_text(size = 7),
+    axis.text.x = element_text(size = 10),
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+ig_top_influencers_barchart_interactive <- ggplotly(ig_barchart, tooltip = "text")
+
+ig_top_influencers_barchart_interactive <- ig_top_influencers_barchart_interactive %>%
+  layout(annotations = lapply(1:nrow(ig_filtered), function(i) {
+    list(
+      x = ig_filtered$`Follower Count`[i] + max(ig_filtered$`Follower Count`) * 0.01,
+      y = nrow(ig_filtered) - (i - 1),
+      text = ig_filtered$ShortName[i],
+      xref = "x",
+      yref = "y",
+      showarrow = FALSE,
+      font = list(size = 10, color = "black"),
+      xanchor = "left",
+      align = "left"
+    )
+  }))
+
+ig_top_influencers_barchart_interactive
+```
+
+```{r}
+
+# top 30 tiktok influencers
+tt_filtered <- smd_insights %>%
+  filter(`Media Platform` == "Tiktok") %>%
+  group_by(`Country Base`) %>%
+  slice_max(order_by = `Follower Count`, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  arrange(desc(`Follower Count`)) %>%
+  slice_head(n = 30)
+
+tt_filtered$Rank <- 1:nrow(tt_filtered)
+tt_filtered$Account <- make.unique(as.character(tt_filtered$Account))
+tt_filtered$Rank <- factor(tt_filtered$Rank, levels = rev(tt_filtered$Rank))
+tt_filtered$`Followers Label` <- sapply(tt_filtered$`Follower Count`, format_followers)
+tt_filtered$ShortName <- sub("[^a-zA-Z0-9]+.*$", "", tt_filtered$Account)
+
+tt_barchart <- ggplot(tt_filtered, aes(
+  x = Rank,
+  y = `Follower Count`,
+  text = paste0(
+    "<b>Rank:</b> ", Rank, "<br>",
+    "<b>Account:</b> ", Account, "<br>",
+    "<b>Followers:</b> ", `Followers Label`, "<br>",
+    "<b>Content:</b> ", `Content Topic`, "<br>",
+    "<b>Market:</b> ", `Target Market`
+  )
+)) +
+  coord_flip() +
+  geom_bar(stat = "identity", fill = "#69c9D0", width = 0.8) +  # TikTok black
+  scale_y_continuous(
+    labels = scales::label_number(scale_cut = scales::cut_short_scale()),
+    expand = expansion(mult = c(0, 0.15))
+  ) +
+  labs(
+    title = "Top 30 TikTok Influencers",
+    x = "Rank",
+    y = "Number of Followers"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.margin = margin(5.5, 100, 5.5, 5.5),
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8),
+    axis.text.y = element_text(size = 7),
+    axis.text.x = element_text(size = 10),
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+tt_top_influencers_barchart_interactive <- ggplotly(tt_barchart, tooltip = "text")
+
+tt_top_influencers_barchart_interactive <- tt_top_influencers_barchart_interactive %>%
+  layout(annotations = lapply(1:nrow(tt_filtered), function(i) {
+    list(
+      x = tt_filtered$`Follower Count`[i] + max(tt_filtered$`Follower Count`) * 0.01,
+      y = nrow(tt_filtered) - (i - 1),
+      text = tt_filtered$ShortName[i],
+      xref = "x",
+      yref = "y",
+      showarrow = FALSE,
+      font = list(size = 10, color = "black"),
+      xanchor = "left",
+      align = "left"
+    )
+  }))
+
+tt_top_influencers_barchart_interactive
+```
+
+```{r}
+
+# 3. Piechart Content Dominant
+
+# count number of influencers per content topic
+content_data <- smd_insights %>%
+  filter(!is.na(`Content Topic`)) %>%
+  group_by(`Content Topic`) %>%
+  summarise(InfluencerCount = n(), .groups = "drop") %>%
+  arrange(desc(InfluencerCount))
+
+# split top 5 and group the rest as "Others"
+top_n <- 5
+top_content <- content_data[1:top_n, ]
+others_sum <- sum(content_data$InfluencerCount[(top_n + 1):nrow(content_data)])
+
+# add "Others" row
+others_row <- data.frame(`Content Topic` = "Others", InfluencerCount = others_sum)
+
+pie_data <- bind_rows(top_content, others_row)
+
+# colours for top 5 and grey for Others
+slice_colors <- c(
+  RColorBrewer::brewer.pal(n = top_n, name = "Set1"),  
+  "#D3D3D3"  
+)
+
+# interactive pie chart
+piechart_content_dominant <- plot_ly(
+  data = pie_data,
+  labels = ~`Content Topic`,
+  values = ~InfluencerCount,
+  type = 'pie',
+  textinfo = 'label+percent',
+  insidetextorientation = 'radial',
+  marker = list(colors = slice_colors),
+  hovertemplate = paste(
+    "<b>%{label}</b><br>",
+    "Influencers: %{value}<br>",
+    "Share: %{percent}<extra></extra>"
+  )
+) %>%
+  layout(
+    title = "Most Common and Popular Content Trends",
+    showlegend = TRUE
+  )
+
+piechart_content_dominant
+
+```
+
+```{r}
+
+# 4. Treemap Content Dominant per Platform
+
+platform_colors <- c(
+  "Instagram" = "#D02A7B",  
+  "Tiktok" = "#69c9D0",     
+  "Youtube" = "#FF0400",  
+  "Unknown" = "#708090"        
+)
+
+# count influencers per platform + content
+treemap_data <- smd_insights %>%
+  filter(!is.na(`Media Platform`), !is.na(`Content Topic`)) %>%
+  group_by(`Media Platform`, `Content Topic`) %>%
+  summarise(InfluencerCount = n(), .groups = "drop")
+
+# adding parent labels 
+treemap_data <- treemap_data %>%
+  mutate(
+    id = paste(`Media Platform`, `Content Topic`, sep = " - "),
+    parent = `Media Platform`,
+    label = `Content Topic`,
+    color = platform_colors[`Media Platform`]
+  )
+
+# add root (platforms)
+platforms <- treemap_data %>%
+  group_by(`Media Platform`) %>%
+  summarise(InfluencerCount = sum(InfluencerCount)) %>%
+  mutate(
+    id = `Media Platform`,
+    parent = "",
+    label = `Media Platform`,
+    color = platform_colors[`Media Platform`] 
+  )
+
+# bind both levels - platforms and treemap
+treemap_content_dominant <- bind_rows(platforms, treemap_data)
+
+# create treemap
+treemap_content_dominant_platform <- plot_ly(
+  data = treemap_content_dominant,
+  type = "treemap",
+  ids = ~id,
+  labels = ~label,
+  parents = ~parent,
+  values = ~InfluencerCount,
+  textinfo = "label",
+  marker = list(colors = ~color, colorscale = "identity"),
+  hovertemplate = paste(
+    "<b>%{label}</b><br>",
+    "Influencers: %{value}<br>",
+    "Platform (%): %{percentParent}<extra></extra>"
+  )
+)%>%
+  layout(
+    title = "Most Common and Popular Content Trends by Platform",
+    showlegend = TRUE
+  )
+
+treemap_content_dominant_platform
+```
+
+```{r}
+
+# 5. CPV Line Chart
+# apply CPV estimates and calculate earnings (cpv searched online)
+cpv_chart_data <- smd_insights %>%
+  filter(!is.na(`Reached Audience`), !is.na(`Media Platform`)) %>%
+  mutate(CPV = case_when(
+    `Media Platform` == "Youtube" ~ 20,
+    `Media Platform` == "Instagram" ~ 5.5,
+    `Media Platform` == "Tiktok" ~ 0.03,
+    TRUE ~ NA_real_
+  )) %>%
+  filter(!is.na(CPV)) %>%
+  mutate(
+    Estimated_Revenue = (`Reached Audience` / 1000) * CPV
+  )
+
+# top earning account per platform + reach
+revenue_by_reach <- cpv_chart_data %>%
+  group_by(`Media Platform`, `Reached Audience`) %>%
+  slice_max(order_by = Estimated_Revenue, n = 1) %>%
+  ungroup() %>%
+  filter(!is.na(`Reached Audience`), !is.na(Estimated_Revenue), Estimated_Revenue > 0)
+
+# format numbers nicely
+format_number_short <- function(x) {
+  ifelse(is.na(x), NA,
+    ifelse(x >= 1e9, paste0(round(x / 1e9, 1), "B"),
+    ifelse(x >= 1e6, paste0(round(x / 1e6, 1), "M"),
+    ifelse(x >= 1e3, paste0(round(x / 1e3, 1), "K"),
+           round(x, 0)))))
+}
+
+# format hover labels
+revenue_by_reach <- revenue_by_reach %>%
+  mutate(
+    Reach_Label = format_number_short(`Reached Audience`),
+    Revenue_Label = paste0("$", format_number_short(Estimated_Revenue)),
+    Hover_Label = paste0(
+      "<b>Platform:</b> ", `Media Platform`, "<br>",
+      "<b>Account:</b> ", Account, "<br>",
+      "<b>Reach:</b> ", Reach_Label, "<br>",
+      "<b>Revenue:</b> ", Revenue_Label
+    )
+  )
+
+# total revenue per platform
+total_rev <- cpv_chart_data %>%
+  group_by(`Media Platform`) %>%
+  summarise(Total_Revenue = sum(Estimated_Revenue, na.rm = TRUE))
+
+# create line chart
+revenue_chart <- ggplot(revenue_by_reach, aes(
+  x = `Reached Audience`,
+  y = Estimated_Revenue,
+  color = `Media Platform`,
+  group = `Media Platform`,
+  text = Hover_Label
+)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c(
+    "Youtube" = "#FF0000",
+    "Tiktok" = "#69c9D0",
+    "Instagram" = "#D02A7B"
+  )) +
+  scale_x_continuous(labels = label_number(scale_cut = cut_short_scale())) +
+  scale_y_continuous(labels = dollar_format(scale_cut = cut_short_scale())) +
+  labs(
+    title = "CPV Comparison Across Platforms",
+    x = "Reached Audience",
+    y = "Estimated Revenue ($ USD)",
+    color = "Platform"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8),
+    axis.text.y = element_text(size = 7),
+    axis.text.x = element_text(size = 10),
+    legend.position = "bottom"
+  )
+
+# HTML-style summary label (searched chatgpt how to do)
+summary_text <- total_rev %>%
+  mutate(
+    Pretty_Platform = case_when(
+      `Media Platform` == "Youtube" ~ "<span style='color:#FF0000; font-weight:bold;'>YouTube</span>",
+      `Media Platform` == "Instagram" ~ "<span style='color:#D02A7B; font-weight:bold;'>Instagram</span>",
+      `Media Platform` == "Tiktok" ~ "<span style='color:#69c9D0; font-weight:bold;'>TikTok</span>"
+    ),
+    Label = paste0(Pretty_Platform, ": $", format_number_short(Total_Revenue))
+  ) %>%
+  pull(Label) %>%
+  paste(collapse = "<br>")
+
+# interactive plot with floating annotation
+interactive_revenue_chart <- ggplotly(revenue_chart, tooltip = "text") %>%
+  layout(
+    annotations = list(
+      list(
+        x = 0.9,
+        y = 0.2,
+        xref = "paper",
+        yref = "paper",
+        showarrow = FALSE,
+        align = "right",
+        text = summary_text,
+        font = list(size = 10),
+        xanchor = "right",
+        yanchor = "top"
+      )
+    )
+  )
+
+interactive_revenue_chart
+```
+
+## Big Idea Charts
+
+```{r}
+
+# 1. Dominant Content by View and Engagement Rate  (Shows which content reached most users)
+
+# summarise per content type
+content_summary <- smd_insights %>%
+  filter(!is.na(`Content Topic`), !is.na(`View %`), !is.na(`Engagement %`), !is.na(`Reached Audience`)) %>%
+  group_by(`Content Topic`) %>%
+  summarise(
+    Est_View_Count = sum(`Reached Audience` * (`View %` / 100), na.rm = TRUE),
+    Est_Engage_Count = sum(`Reached Audience` * (`Engagement %` / 100), na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(Content = reorder(`Content Topic`, Est_Engage_Count + Est_View_Count))
+
+stacked_data <- content_summary %>%
+  select(Content, Est_Engage_Count, Est_View_Count) %>%
+  pivot_longer(cols = c(Est_Engage_Count, Est_View_Count), names_to = "Metric", values_to = "Value") %>%
+  mutate(Metric = recode(Metric, 
+                         Est_Engage_Count = "Engagement Rate",
+                         Est_View_Count = "View Rate"))
+# plot with clean legend
+stacked_bar_chart <- ggplot(stacked_data, aes(
+  x = Content,
+  y = Value,
+  fill = Metric,
+  text = paste0(
+    "<b>Content:</b> ", Content, "<br>",
+    "<b>Metric:</b> ", Metric, "<br>",
+    "<b>Value:</b> ", format(round(Value), big.mark = ",")
+  )
+)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_manual(
+    values = c("Engagement Rate" = "#FF6347", "View Rate" = "#008080")
+  ) +
+  scale_y_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
+  labs(
+    title = "Content Types by Engagement and View",
+    x = NULL,
+    y = "Estimated Audience Count",
+    fill = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.y = element_text(size = 9)
+  )
+
+interactive_stacked_chart <- ggplotly(stacked_bar_chart, tooltip = "text")
+interactive_stacked_chart
+
+```
+
+```{r}
+
+# 2. Content Driving ER and VR
+# fix to finding america data
+continent_manual_fix <- function(country) {
+  case_when(
+    country %in% c("USA", "United States", "US", "Canada", "Mexico") ~ "North America",
+    country %in% c("Brazil", "Argentina", "Chile", "Colombia", "Peru") ~ "South America",
+    country %in% c("UK", "United Kingdom", "France", "Germany") ~ "Europe",
+    country %in% c("UAE", "India", "Japan", "China", "Saudi Arabia") ~ "Asia",
+    country %in% c("South Africa", "Nigeria", "Kenya", "Egypt") ~ "Africa",
+    country %in% c("Australia", "New Zealand") ~ "Oceania",
+    TRUE ~ NA_character_
+  )
+}
+
+# add continent (manual fix over countrycode - not reading america data correctly)
+smd_insights <- smd_insights %>%
+  mutate(
+    Continent_raw = countrycode(`Country Base`, origin = 'country.name', destination = 'continent'),
+    Continent_fix = continent_manual_fix(`Country Base`),
+    Continent = ifelse(!is.na(Continent_fix), Continent_fix, Continent_raw)
+  )
+
+# prep data
+scatter_data <- smd_insights %>%
+  filter(!is.na(`Content Topic`), !is.na(`Engagement %`), !is.na(`View %`), !is.na(Continent)) %>%
+  mutate(Content = factor(`Content Topic`))
+
+# custom color palette
+custom_colors <- c(
+  "#e41a1c", "#377eb8", "#4daf4a", "#984ea3", "#ff7f00",
+  "#ffff33", "#a65628", "#f781bf", "#999999", "#66c2a5",
+  "#fc8d62", "#8da0cb", "#e90ac3", "#a6d854", "#ffd92f",
+  "#8A2BE2"
+)
+
+# list of continents to plot
+continents <- c("Asia", "Europe", "North America", "South America", "Africa", "Oceania")
+
+# create one chart per continent
+continent_charts <- lapply(continents, function(continent) {
+  df <- scatter_data %>% filter(Continent == continent)
+
+  if (nrow(df) == 0) return(NULL)
+
+  scatterplot_content_drive <- ggplot(df, aes(
+    x = `View %`,
+    y = `Engagement %`,
+    color = Content,
+    text = paste0(
+      "<b>Account:</b> ", `Account`, "<br>",
+      "<b>Content:</b> ", `Content Topic`, "<br>",
+      "<b>View %:</b> ", round(`View %`, 2), "<br>",
+      "<b>Engagement %:</b> ", round(`Engagement %`, 2), "<br>",
+      "<b>Country:</b> ", `Country Base`
+    )
+  )) +
+    geom_point(alpha = 0.7, size = 2) +
+    scale_color_manual(values = custom_colors) +
+    labs(
+      title = paste("Content Performance in", continent),
+      x = "View Rate (%)",
+      y = "Engagement Rate (%)",
+      color = "Content Type"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      legend.position = "bottom",
+      axis.title.x = element_text(size = 8),
+      axis.title.y = element_text(size = 8),
+      axis.text.y = element_text(size = 7),
+      axis.text.x = element_text(size = 10)
+    )
+
+  ggplotly(scatterplot_content_drive, tooltip = "text")
+})
+
+# assign names and output
+names(continent_charts) <- continents
+continent_charts
+# continent_charts$North America
+
+
+
+```
+
+```{r}
+
+# 2. Engagement Rate Across Markets and Content Types
+# engagement rate by content type and continent
+engagement_by_content_continent <- smd_insights %>%
+  filter(!is.na(`Content Topic`), !is.na(`Engagement %`), !is.na(Continent)) %>%
+  group_by(`Content Topic`, Continent) %>%
+  summarise(
+    Avg_Engagement_Rate = mean(`Engagement %`, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# add custom hover label
+engagement_by_content_continent <- engagement_by_content_continent %>%
+  mutate(hover_text = paste0(
+    "<b>Continent:</b> ", Continent, "<br>",
+    "<b>Content:</b> ", `Content Topic`, "<br>",
+    "<b>Average ER:</b> ", round(Avg_Engagement_Rate, 2), "%"
+  ))
+
+# create heatmap with red palette
+heatmap_engagement <- ggplot(engagement_by_content_continent, aes(
+  x = Continent,
+  y = `Content Topic`,
+  fill = Avg_Engagement_Rate,
+  text = hover_text
+)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(
+    low = "#FFE5E0",
+    high = "#B22222"
+  ) +
+  labs(
+    title = "Content Effectiveness Across Continents",
+    fill = "Engagement Rate (%)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.title = element_blank(),
+    axis.text.x = element_text(hjust = 1, size = 8),
+    axis.text.y = element_text(size = 7)
+  )
+
+interactive_heatmap <- ggplotly(heatmap_engagement, tooltip = "text", width = 1000) %>%
+  layout(
+    margin = list(l = 100, r = 40, b = 100, t = 80)
+  )
+
+interactive_heatmap
+
+
+```
+
+```{r}
+
+# 3. Platform Performance Across Continents (Engagement Rate)
+
+# aggregate engagement rate
+platform_engagement <- smd_insights %>%
+  filter(!is.na(`Media Platform`), !is.na(Continent), !is.na(`Engagement %`)) %>%
+  group_by(Continent, `Media Platform`) %>%
+  summarise(
+    Avg_Engagement_Rate = mean(`Engagement %`, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# order continents by total engagement
+continent_order <- platform_engagement %>%
+  group_by(Continent) %>%
+  summarise(total = sum(Avg_Engagement_Rate)) %>%
+  arrange(desc(total)) %>%
+  pull(Continent)
+
+platform_engagement$Continent <- factor(platform_engagement$Continent, levels = continent_order)
+
+# create stacked bar
+platform_stacked_bar <- ggplot(platform_engagement, aes(
+  x = Avg_Engagement_Rate,
+  y = Continent,
+  fill = `Media Platform`,
+  text = paste0(
+    "<b>Continent:</b> ", Continent, "<br>",
+    "<b>Platform:</b> ", `Media Platform`, "<br>",
+    "<b>Avg Engagement Rate:</b> ", round(Avg_Engagement_Rate, 2), "%"
+  )
+)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(
+    values = c(
+      "Youtube" = "#e41a1c",
+      "Tiktok" = "#69c9D0",
+      "Instagram" = "#D02A7B"
+    )
+  ) +
+  labs(
+    title = "Platform Engagement Performance by Continent",
+    x = "Avg Engagement Rate (%)",
+    y = "Continent",
+    fill = "Platform"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.position = "bottom",
+    axis.title.x = element_text(size = 9),
+    axis.title.y = element_blank(),    
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 9)
+  )
+
+interactive_platform_chart <- ggplotly(platform_stacked_bar, tooltip = "text")
+interactive_platform_chart
+
+
+
+```
+
+```         
+```
+
+```         
+```
+
+```         
+```
